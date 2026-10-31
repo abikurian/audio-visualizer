@@ -2,20 +2,20 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 
 /**
  * AudioVisualizer
- * A music-reactive screensaver optimized for standard LED displays (prevents backlight bleed).
- * Built with Web Audio API and HTML5 Canvas.
+ * Ultra-minimalist, cinematic circular audio spectrum.
+ * Tuned for standard LED displays (Slate-950 background, icy-cyan palette, motion blur trails).
  */
 export default function AudioVisualizer({ onClose }) {
+  const [isEngineActive, setIsEngineActive] = useState(false);
+  const [errorMessage, setErrorMessage] = useState(null);
+
   const canvasRef = useRef(null);
   const audioCtxRef = useRef(null);
   const analyserRef = useRef(null);
   const streamRef = useRef(null);
   const animFrameIdRef = useRef(null);
 
-  const [isInitialized, setIsInitialized] = useState(false);
-  const [errorMessage, setErrorMessage] = useState(null);
-
-  // Stop all active audio streams and contexts
+  // Stop media tracks, close audio context, cancel animation frames
   const cleanupAudio = useCallback(() => {
     if (animFrameIdRef.current) {
       cancelAnimationFrame(animFrameIdRef.current);
@@ -33,12 +33,11 @@ export default function AudioVisualizer({ onClose }) {
     }
   }, []);
 
-  // Initialize Web Audio Engine via user gesture
+  // Initialize Web Audio Engine after user gesture
   const initAudioEngine = async () => {
     try {
       setErrorMessage(null);
 
-      // 1. Request microphone access
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: false,
@@ -49,7 +48,6 @@ export default function AudioVisualizer({ onClose }) {
       });
       streamRef.current = stream;
 
-      // 2. Initialize AudioContext and AnalyserNode
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
       const audioCtx = new AudioContextClass();
       if (audioCtx.state === 'suspended') {
@@ -59,46 +57,47 @@ export default function AudioVisualizer({ onClose }) {
 
       const analyser = audioCtx.createAnalyser();
       analyser.fftSize = 256; // 128 frequency bins
-      analyser.smoothingTimeConstant = 0.82;
+      analyser.smoothingTimeConstant = 0.85; // Motion smoothing
       analyserRef.current = analyser;
 
-      // 3. Connect microphone to AnalyserNode ONLY (DO NOT connect to destination to prevent feedback)
+      // Connect mic stream exclusively to AnalyserNode (never destination)
       const source = audioCtx.createMediaStreamSource(stream);
       source.connect(analyser);
 
-      setIsInitialized(true);
+      // Transition state: unmounts button overlay before canvas starts rendering
+      setIsEngineActive(true);
     } catch (err) {
       console.error('Audio initialization failed:', err);
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        setErrorMessage('Microphone access was denied. Please allow microphone access to visualize audio.');
+        setErrorMessage('Microphone access denied. Please allow microphone permissions.');
       } else {
         setErrorMessage(`Audio initialization error: ${err.message || 'Unknown error'}`);
       }
     }
   };
 
-  // Close handler
   const handleClose = () => {
     cleanupAudio();
-    setIsInitialized(false);
+    setIsEngineActive(false);
     if (onClose) {
       onClose();
     }
   };
 
-  // Canvas visual rendering loop
+  // Canvas render loop - active only when isEngineActive is true
   useEffect(() => {
+    if (!isEngineActive) return;
+
     const canvas = canvasRef.current;
     if (!canvas) return;
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Handle high-DPI scaling & resize
+    // Viewport resizing
     const handleResize = () => {
       canvas.width = window.innerWidth;
       canvas.height = window.innerHeight;
-      // Initial fill with LED-friendly Slate-950 (#020617)
       ctx.fillStyle = '#020617';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
     };
@@ -106,257 +105,157 @@ export default function AudioVisualizer({ onClose }) {
     handleResize();
     window.addEventListener('resize', handleResize);
 
-    // Particle pool for radiating treble effects
-    const particles = [];
-    const maxParticles = 120;
+    // Audio sampling configuration
+    const analyser = analyserRef.current;
+    const bufferLength = analyser ? analyser.frequencyBinCount : 128;
+    const rawData = new Uint8Array(bufferLength);
 
-    for (let p = 0; p < maxParticles; p++) {
-      particles.push({
-        x: canvas.width / 2,
-        y: canvas.height / 2,
-        angle: Math.random() * Math.PI * 2,
-        speed: 1 + Math.random() * 3,
-        radius: 1 + Math.random() * 2,
-        life: 0,
-        maxLife: 40 + Math.random() * 60,
-        hue: 180 + Math.random() * 140, // Cyan (180) to Magenta (320)
-      });
-    }
+    // Sample 64 frequency bands with bilateral symmetry
+    const numBars = 64;
+    // Smoothed values for lerp motion smoothing
+    const smoothedValues = new Float32Array(numBars);
+    const lerpFactor = 0.12;
 
-    let rotationAngle = 0;
-    let idlePhase = 0;
+    let time = 0;
 
-    // Main animation loop
     const render = () => {
       const width = canvas.width;
       const height = canvas.height;
       const cx = width / 2;
       const cy = height / 2;
 
-      // 1. LED Motion Blur: Fill canvas with semi-transparent slate-950 for trails
+      // 1. LED Motion Blur: Transparent Slate-950 fill creates crisp phosphor-like light trails
       ctx.fillStyle = 'rgba(2, 6, 23, 0.25)';
       ctx.fillRect(0, 0, width, height);
 
-      // Data extraction
-      let bass = 0;
-      let mid = 0;
-      let treble = 0;
-      let dataArray = null;
+      time += 0.015;
 
-      if (analyserRef.current) {
-        const bufferLength = analyserRef.current.frequencyBinCount; // 128 bins
-        dataArray = new Uint8Array(bufferLength);
-        analyserRef.current.getByteFrequencyData(dataArray);
-
-        // Low frequency bins (Bass: bins 1 - 8)
-        let bassSum = 0;
-        const bassCount = 8;
-        for (let i = 1; i <= bassCount; i++) {
-          bassSum += dataArray[i];
-        }
-        bass = bassSum / (bassCount * 255);
-
-        // Mid frequency bins (bins 9 - 36)
-        let midSum = 0;
-        const midCount = 28;
-        for (let i = 9; i < 9 + midCount; i++) {
-          midSum += dataArray[i];
-        }
-        mid = midSum / (midCount * 255);
-
-        // High frequency bins (Treble: bins 37 - 110)
-        let trebleSum = 0;
-        const trebleCount = 74;
-        for (let i = 37; i < 37 + trebleCount; i++) {
-          trebleSum += dataArray[i];
-        }
-        treble = trebleSum / (trebleCount * 255);
-      } else {
-        // Idle animation breathing when waiting for mic
-        idlePhase += 0.02;
-        bass = (Math.sin(idlePhase) + 1) * 0.08;
-        mid = (Math.cos(idlePhase * 0.7) + 1) * 0.05;
-        treble = (Math.sin(idlePhase * 1.3) + 1) * 0.04;
+      // 2. Fetch and interpolate frequency data
+      if (analyser) {
+        analyser.getByteFrequencyData(rawData);
       }
 
-      rotationAngle += 0.005 + bass * 0.015;
+      for (let i = 0; i < numBars; i++) {
+        // Map linearly through audible range (bins 1 to 90)
+        const binIndex = Math.min(bufferLength - 1, Math.floor(1 + (i / numBars) * 85));
+        const targetValue = rawData[binIndex] || 0;
+        // Smooth interpolation (lerp) prevents harsh snapping
+        smoothedValues[i] += (targetValue - smoothedValues[i]) * lerpFactor;
+      }
 
-      // 2. Base Dimensions
+      // Base radius scaled to screen dimensions
       const minDimension = Math.min(width, height);
-      const baseRadius = minDimension * 0.12 + bass * (minDimension * 0.1);
+      const baseRadius = minDimension * 0.22;
+      const maxAmplitude = minDimension * 0.18;
 
-      // 3. Central Ambient Glow & Deep Orb (Bass-reactive)
-      const orbPulseRadius = Math.max(10, baseRadius * (0.85 + bass * 0.45));
-      const coreGradient = ctx.createRadialGradient(cx, cy, orbPulseRadius * 0.1, cx, cy, orbPulseRadius * 1.6);
-      
-      // Vibrant Electric Cyan to Neon Magenta LED palette
-      coreGradient.addColorStop(0, 'rgba(255, 255, 255, 0.95)');
-      coreGradient.addColorStop(0.2, 'rgba(6, 245, 255, 0.85)'); // Electric cyan
-      coreGradient.addColorStop(0.55, 'rgba(168, 85, 247, 0.45)'); // Vibrant violet
-      coreGradient.addColorStop(0.85, 'rgba(236, 72, 153, 0.2)'); // Hot pink / magenta
-      coreGradient.addColorStop(1, 'rgba(2, 6, 23, 0)');
-
+      // 3. Ultra-minimalist Concentric Base Guides (Icy Cyan Palette)
       ctx.save();
-      ctx.fillStyle = coreGradient;
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.12)';
       ctx.beginPath();
-      ctx.arc(cx, cy, orbPulseRadius * 1.6, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-
-      // 4. Central Geometric Polygonal Core (Pulsing sacred geometry)
-      ctx.save();
-      ctx.translate(cx, cy);
-      ctx.rotate(rotationAngle);
-
-      const sides = 6;
-      ctx.beginPath();
-      for (let s = 0; s <= sides; s++) {
-        const polyAngle = (s / sides) * Math.PI * 2;
-        const polyDist = orbPulseRadius * (0.7 + (s % 2 === 0 ? 0.2 : -0.1) * (1 + bass));
-        const px = Math.cos(polyAngle) * polyDist;
-        const py = Math.sin(polyAngle) * polyDist;
-        if (s === 0) ctx.moveTo(px, py);
-        else ctx.lineTo(px, py);
-      }
-      ctx.closePath();
-      ctx.strokeStyle = `rgba(6, 245, 255, ${0.4 + bass * 0.5})`;
-      ctx.lineWidth = 2 + bass * 3;
-      ctx.shadowColor = '#06b6d4';
-      ctx.shadowBlur = 12 + bass * 20;
+      ctx.arc(cx, cy, baseRadius, 0, Math.PI * 2);
       ctx.stroke();
 
-      // Second counter-rotating inner geometric triangle
+      // Subtle inner core ring
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.05)';
       ctx.beginPath();
-      for (let s = 0; s <= 3; s++) {
-        const polyAngle = (s / 3) * Math.PI * 2 - rotationAngle * 2;
-        const polyDist = orbPulseRadius * 0.45 * (1 + bass * 0.6);
-        const px = Math.cos(polyAngle) * polyDist;
-        const py = Math.sin(polyAngle) * polyDist;
-        if (s === 0) ctx.moveTo(px, py);
-        else ctx.lineTo(px, py);
-      }
-      ctx.closePath();
-      ctx.strokeStyle = `rgba(244, 63, 94, ${0.5 + mid * 0.5})`;
-      ctx.lineWidth = 1.5;
-      ctx.shadowColor = '#ec4899';
-      ctx.shadowBlur = 10;
+      ctx.arc(cx, cy, baseRadius * 0.65, 0, Math.PI * 2);
       ctx.stroke();
       ctx.restore();
 
-      // 5. Radiating Frequency Rays & Waves (Symmetric circular waveform)
-      if (dataArray) {
-        const binsCount = 64; // Focus on impactful audible range
-        ctx.save();
-        ctx.translate(cx, cy);
-
-        // Circular frequency spikes
-        for (let i = 0; i < binsCount; i++) {
-          const val = dataArray[i] / 255;
-          const spikeHeight = val * (minDimension * 0.28);
-
-          // Draw dual symmetrical arcs
-          const stepAngle = (Math.PI / binsCount) * i;
-          const angles = [
-            rotationAngle + stepAngle,
-            rotationAngle - stepAngle,
-            rotationAngle + Math.PI + stepAngle,
-            rotationAngle + Math.PI - stepAngle,
-          ];
-
-          const hue = 180 + (i / binsCount) * 140; // 180 (Cyan) -> 320 (Neon Pink)
-          ctx.strokeStyle = `hsla(${hue}, 100%, 65%, ${0.5 + val * 0.5})`;
-          ctx.lineWidth = Math.max(1.5, (minDimension / 450) * (1 + val * 0.8));
-          ctx.shadowColor = `hsl(${hue}, 100%, 55%)`;
-          ctx.shadowBlur = 6 + val * 12;
-
-          angles.forEach((ang) => {
-            const startX = Math.cos(ang) * orbPulseRadius;
-            const startY = Math.sin(ang) * orbPulseRadius;
-            const endX = Math.cos(ang) * (orbPulseRadius + spikeHeight);
-            const endY = Math.sin(ang) * (orbPulseRadius + spikeHeight);
-
-            ctx.beginPath();
-            ctx.moveTo(startX, startY);
-            ctx.lineTo(endX, endY);
-            ctx.stroke();
-
-            // Tip sparkle on punchy spikes
-            if (val > 0.45) {
-              ctx.fillStyle = '#ffffff';
-              ctx.beginPath();
-              ctx.arc(endX, endY, 1.5 + val * 2, 0, Math.PI * 2);
-              ctx.fill();
-            }
-          });
-        }
-        ctx.restore();
-      }
-
-      // 6. Treble Reactivity: Radiating explosive particles & fractal lines
-      const trebleEnergy = treble * (1 + bass * 0.5);
-      const spawnChance = 0.2 + trebleEnergy * 0.8;
+      // 4. Classic Geometric Circular Audio Spectrum (Bilateral Symmetry)
+      // Left and right halves mirror each other from top (0 rad) to bottom (π rad)
+      const angleStep = Math.PI / numBars;
 
       ctx.save();
-      for (let p = 0; p < particles.length; p++) {
-        const pt = particles[p];
+      ctx.lineWidth = 2; // Thin, sharp, refined lines
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.85)'; // Deliberate icy cyan
+      ctx.shadowColor = 'rgba(56, 189, 248, 0.45)';
+      ctx.shadowBlur = 6;
 
-        // Accelerate & expand on high treble
-        const currentSpeed = pt.speed * (1 + trebleEnergy * 3.5);
-        pt.x += Math.cos(pt.angle) * currentSpeed;
-        pt.y += Math.sin(pt.angle) * currentSpeed;
-        pt.life++;
+      const peakPoints = [];
 
-        // Reset particle if dead or out of bounds
-        const distFromCenter = Math.hypot(pt.x - cx, pt.y - cy);
-        if (
-          pt.life > pt.maxLife ||
-          distFromCenter > minDimension * 0.85 ||
-          pt.x < 0 ||
-          pt.x > width ||
-          pt.y < 0 ||
-          pt.y > height
-        ) {
-          if (Math.random() < spawnChance) {
-            pt.life = 0;
-            pt.maxLife = 30 + Math.random() * 50;
-            pt.angle = Math.random() * Math.PI * 2;
-            pt.speed = 1.5 + Math.random() * 3.5 + trebleEnergy * 4;
-            // Spawn just outside the pulsating orb
-            const spawnRadius = orbPulseRadius * (0.95 + Math.random() * 0.2);
-            pt.x = cx + Math.cos(pt.angle) * spawnRadius;
-            pt.y = cy + Math.sin(pt.angle) * spawnRadius;
-            pt.hue = 180 + Math.random() * 140; // Electric Cyan to Magenta
-            pt.radius = 1 + Math.random() * 2 + trebleEnergy * 2;
-          }
-        }
+      for (let i = 0; i < numBars; i++) {
+        const normalized = smoothedValues[i] / 255;
+        // Subtle ambient breathing on silence
+        const ambientBreath = Math.sin(time + i * 0.1) * 1.5;
+        const amplitude = Math.max(1, normalized * maxAmplitude + ambientBreath);
 
-        // Draw particle trail
-        const alpha = Math.max(0, 1 - pt.life / pt.maxLife);
-        ctx.fillStyle = `hsla(${pt.hue}, 100%, 70%, ${alpha})`;
-        ctx.shadowColor = `hsl(${pt.hue}, 100%, 50%)`;
-        ctx.shadowBlur = 8 + trebleEnergy * 8;
+        // Right arc: -π/2 to +π/2
+        const rightAngle = -Math.PI / 2 + i * angleStep;
+        // Left arc: -π/2 to -3π/2 (mirrored)
+        const leftAngle = -Math.PI / 2 - i * angleStep;
 
+        const cosR = Math.cos(rightAngle);
+        const sinR = Math.sin(rightAngle);
+        const cosL = Math.cos(leftAngle);
+        const sinL = Math.sin(leftAngle);
+
+        const r1 = baseRadius;
+        const r2 = baseRadius + amplitude;
+
+        // Draw Right Spectrum Bar
         ctx.beginPath();
-        ctx.arc(pt.x, pt.y, pt.radius * (1 + trebleEnergy * 0.5), 0, Math.PI * 2);
-        ctx.fill();
+        ctx.moveTo(cx + cosR * r1, cy + sinR * r1);
+        ctx.lineTo(cx + cosR * r2, cy + sinR * r2);
+        ctx.stroke();
 
-        // Connect near particles with delicate neon fractal beams during high treble bursts
-        if (trebleEnergy > 0.4 && p % 4 === 0) {
-          const nextPt = particles[(p + 1) % particles.length];
-          const distBetween = Math.hypot(pt.x - nextPt.x, pt.y - nextPt.y);
-          if (distBetween < 80) {
-            ctx.strokeStyle = `hsla(${pt.hue}, 100%, 75%, ${alpha * 0.35})`;
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.moveTo(pt.x, pt.y);
-            ctx.lineTo(nextPt.x, nextPt.y);
-            ctx.stroke();
-          }
+        // Draw Left Spectrum Bar (Symmetrical mirror)
+        ctx.beginPath();
+        ctx.moveTo(cx + cosL * r1, cy + sinL * r1);
+        ctx.lineTo(cx + cosL * r2, cy + sinL * r2);
+        ctx.stroke();
+
+        // Collect coordinates for the outer continuous waveform boundary
+        peakPoints.push({
+          xR: cx + cosR * r2,
+          yR: cy + sinR * r2,
+          xL: cx + cosL * r2,
+          yL: cy + sinL * r2,
+          val: normalized,
+        });
+      }
+      ctx.restore();
+
+      // 5. Continuous Outer Peak Waveform Ribbon
+      ctx.save();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(224, 242, 254, 0.4)'; // Crisp icy-white accent
+      ctx.beginPath();
+
+      // Trace right hemisphere
+      for (let i = 0; i < peakPoints.length; i++) {
+        const pt = peakPoints[i];
+        if (i === 0) {
+          ctx.moveTo(pt.xR, pt.yR);
+        } else {
+          ctx.lineTo(pt.xR, pt.yR);
+        }
+      }
+
+      // Trace bottom closure and left hemisphere back to top
+      for (let i = peakPoints.length - 1; i >= 0; i--) {
+        ctx.lineTo(peakPoints[i].xL, peakPoints[i].yL);
+      }
+
+      ctx.closePath();
+      ctx.stroke();
+      ctx.restore();
+
+      // 6. Precision Peak Points (Subtle glowing highlights on peak audio)
+      ctx.save();
+      ctx.fillStyle = 'rgba(240, 249, 255, 0.9)';
+      for (let i = 0; i < peakPoints.length; i += 2) {
+        const pt = peakPoints[i];
+        if (pt.val > 0.35) {
+          ctx.beginPath();
+          ctx.arc(pt.xR, pt.yR, 1.2, 0, Math.PI * 2);
+          ctx.arc(pt.xL, pt.yL, 1.2, 0, Math.PI * 2);
+          ctx.fill();
         }
       }
       ctx.restore();
 
-      // Continue loop
       animFrameIdRef.current = requestAnimationFrame(render);
     };
 
@@ -368,9 +267,9 @@ export default function AudioVisualizer({ onClose }) {
         cancelAnimationFrame(animFrameIdRef.current);
       }
     };
-  }, []);
+  }, [isEngineActive]);
 
-  // Cleanup audio tracks and context when unmounting
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
       cleanupAudio();
@@ -379,53 +278,54 @@ export default function AudioVisualizer({ onClose }) {
 
   return (
     <div className="fixed inset-0 bg-slate-950 z-50 flex items-center justify-center select-none overflow-hidden">
-      {/* Background Canvas */}
-      <canvas
-        ref={canvasRef}
-        className="w-full h-full block cursor-default"
-      />
-
-      {/* Subtle Close [ X ] Button in Top-Right */}
-      <button
-        onClick={handleClose}
-        aria-label="Close Visualizer"
-        className="absolute top-6 right-6 z-50 text-slate-400 hover:text-slate-100 bg-slate-900/80 hover:bg-slate-800/90 border border-slate-700/60 rounded-full w-9 h-9 flex items-center justify-center text-sm font-mono transition-all duration-200 backdrop-blur-sm shadow-lg shadow-black/40"
-      >
-        ✕
-      </button>
-
-      {/* Centered User Gesture Initialization Button */}
-      {!isInitialized && (
-        <div className="absolute z-20 flex flex-col items-center gap-3">
+      {/* 1. Pre-initialization State: Clean centered button; completely unmounts once active */}
+      {!isEngineActive && (
+        <div className="flex flex-col items-center gap-3 z-10 px-6 text-center">
           <button
             onClick={initAudioEngine}
-            className="bg-slate-900 border border-slate-700 text-slate-300 rounded-full px-6 py-2 text-xs tracking-widest uppercase hover:bg-slate-800 transition-colors shadow-2xl hover:border-slate-500 hover:text-slate-100"
+            className="bg-slate-900 border border-slate-700 text-slate-300 rounded-full px-6 py-2 text-xs tracking-widest uppercase hover:bg-slate-800 transition-colors shadow-xl"
           >
             Initialize Audio Engine
           </button>
 
           {errorMessage ? (
-            <p className="text-rose-400 text-xs tracking-wide max-w-sm text-center px-4 bg-slate-900/90 border border-rose-900/50 py-2 rounded-lg">
+            <p className="text-rose-400 text-xs tracking-wide max-w-sm bg-slate-900/90 border border-rose-900/50 py-1.5 px-3 rounded-full mt-2">
               {errorMessage}
             </p>
           ) : (
-            <span className="text-slate-500 text-[10px] tracking-wider uppercase">
-              Microphone access required for reactive visuals
+            <span className="text-slate-600 text-[10px] tracking-wider uppercase font-mono">
+              Web Audio API • Microphone Gesture Required
             </span>
           )}
         </div>
       )}
 
-      {/* Live Audio Visualizer Subtle HUD Indicator */}
-      {isInitialized && (
-        <div className="absolute bottom-6 left-6 z-20 flex items-center gap-2 pointer-events-none opacity-40 hover:opacity-100 transition-opacity">
-          <div className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse shadow-sm shadow-cyan-400" />
-          <span className="text-[10px] font-mono tracking-widest uppercase text-slate-400">
-            Audio Engine Active • 256 FFT
-          </span>
-        </div>
+      {/* 2. Active State: Canvas renders only when isEngineActive is true */}
+      {isEngineActive && (
+        <>
+          <canvas
+            ref={canvasRef}
+            className="w-full h-full block cursor-default"
+          />
+
+          {/* Minimalist Close [ X ] Button */}
+          <button
+            onClick={handleClose}
+            aria-label="Close Visualizer"
+            className="absolute top-6 right-6 z-50 text-slate-500 hover:text-slate-300 transition-colors text-xs font-mono tracking-widest uppercase px-3 py-1.5 rounded-full bg-slate-900/40 hover:bg-slate-900/80 border border-slate-800/80 backdrop-blur-sm"
+          >
+            ✕
+          </button>
+
+          {/* Discreet status watermark */}
+          <div className="absolute bottom-6 left-6 z-20 flex items-center gap-2 pointer-events-none opacity-25">
+            <div className="w-1.5 h-1.5 rounded-full bg-sky-400" />
+            <span className="text-[9px] font-mono tracking-widest uppercase text-slate-400">
+              Spectrum Active
+            </span>
+          </div>
+        </>
       )}
     </div>
   );
 }
-
